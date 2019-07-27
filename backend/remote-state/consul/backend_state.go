@@ -7,23 +7,18 @@ import (
 	"github.com/hashicorp/terraform/backend"
 	"github.com/hashicorp/terraform/state"
 	"github.com/hashicorp/terraform/state/remote"
-	"github.com/hashicorp/terraform/terraform"
+	"github.com/hashicorp/terraform/states"
+	"github.com/hashicorp/terraform/states/statemgr"
 )
 
 const (
 	keyEnvPrefix = "-env:"
 )
 
-func (b *Backend) States() ([]string, error) {
-	// Get the Consul client
-	client, err := b.clientRaw()
-	if err != nil {
-		return nil, err
-	}
-
+func (b *Backend) Workspaces() ([]string, error) {
 	// List our raw path
 	prefix := b.configData.Get("path").(string) + keyEnvPrefix
-	keys, _, err := client.KV().Keys(prefix, "/", nil)
+	keys, _, err := b.client.KV().Keys(prefix, "/", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -55,15 +50,9 @@ func (b *Backend) States() ([]string, error) {
 	return result, nil
 }
 
-func (b *Backend) DeleteState(name string) error {
-	if name == backend.DefaultStateName {
+func (b *Backend) DeleteWorkspace(name string) error {
+	if name == backend.DefaultStateName || name == "" {
 		return fmt.Errorf("can't delete default state")
-	}
-
-	// Get the Consul API client
-	client, err := b.clientRaw()
-	if err != nil {
-		return err
 	}
 
 	// Determine the path of the data
@@ -71,26 +60,34 @@ func (b *Backend) DeleteState(name string) error {
 
 	// Delete it. We just delete it without any locking since
 	// the DeleteState API is documented as such.
-	_, err = client.KV().Delete(path, nil)
+	_, err := b.client.KV().Delete(path, nil)
 	return err
 }
 
-func (b *Backend) State(name string) (state.State, error) {
-	// Get the Consul API client
-	client, err := b.clientRaw()
-	if err != nil {
-		return nil, err
-	}
-
+func (b *Backend) StateMgr(name string) (statemgr.Full, error) {
 	// Determine the path of the data
 	path := b.path(name)
 
+	// Determine whether to gzip or not
+	gzip := b.configData.Get("gzip").(bool)
+
 	// Build the state client
-	stateMgr := &remote.State{
+	var stateMgr = &remote.State{
 		Client: &RemoteClient{
-			Client: client,
-			Path:   path,
+			Client:    b.client,
+			Path:      path,
+			GZip:      gzip,
+			lockState: b.lock,
 		},
+	}
+
+	if !b.lock {
+		stateMgr.DisableLocks()
+	}
+
+	// the default state always exists
+	if name == backend.DefaultStateName {
+		return stateMgr, nil
 	}
 
 	// Grab a lock, we use this to write an empty state if one doesn't
@@ -120,7 +117,7 @@ func (b *Backend) State(name string) (state.State, error) {
 
 	// If we have no state, we have to create an empty state
 	if v := stateMgr.State(); v == nil {
-		if err := stateMgr.WriteState(terraform.NewState()); err != nil {
+		if err := stateMgr.WriteState(states.NewState()); err != nil {
 			err = lockUnlock(err)
 			return nil, err
 		}

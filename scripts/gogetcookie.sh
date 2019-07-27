@@ -1,10 +1,8 @@
-#!/bin/bash
-
 touch ~/.gitcookies
 chmod 0600 ~/.gitcookies
 
 git config --global http.cookiefile ~/.gitcookies
 
 tr , \\t <<\__END__ >>~/.gitcookies
-.googlesource.com,TRUE,/,TRUE,2147483647,o,git-paul.hashicorp.com=1/z7s05EYPudQ9qoe6dMVfmAVwgZopEkZBb1a2mA5QtHE
+go.googlesource.com,FALSE,/,TRUE,2147483647,o,git-admin.hashicorptest.com=1/5dMSZVNdQscVq3on5V38iBrG9sP2TYRlbj3TDMJHKEvoBxl_QW-zl-L7a8lk-FU-
 __END__

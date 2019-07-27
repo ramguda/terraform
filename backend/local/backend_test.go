@@ -10,30 +10,38 @@ import (
 	"testing"
 
 	"github.com/hashicorp/terraform/backend"
-	"github.com/hashicorp/terraform/state"
-	"github.com/hashicorp/terraform/terraform"
+	"github.com/hashicorp/terraform/states/statefile"
+	"github.com/hashicorp/terraform/states/statemgr"
 )
 
 func TestLocal_impl(t *testing.T) {
-	var _ backend.Enhanced = new(Local)
-	var _ backend.Local = new(Local)
-	var _ backend.CLI = new(Local)
+	var _ backend.Enhanced = New()
+	var _ backend.Local = New()
+	var _ backend.CLI = New()
+}
+
+func TestLocal_backend(t *testing.T) {
+	defer testTmpDir(t)()
+	b := New()
+	backend.TestBackendStates(t, b)
+	backend.TestBackendStateLocks(t, b, b)
 }
 
 func checkState(t *testing.T, path, expected string) {
+	t.Helper()
 	// Read the state
 	f, err := os.Open(path)
 	if err != nil {
 		t.Fatalf("err: %s", err)
 	}
 
-	state, err := terraform.ReadState(f)
+	state, err := statefile.Read(f)
 	f.Close()
 	if err != nil {
 		t.Fatalf("err: %s", err)
 	}
 
-	actual := strings.TrimSpace(state.String())
+	actual := state.State.String()
 	expected = strings.TrimSpace(expected)
 	if actual != expected {
 		t.Fatalf("state does not match! actual:\n%s\n\nexpected:\n%s", actual, expected)
@@ -41,7 +49,7 @@ func checkState(t *testing.T, path, expected string) {
 }
 
 func TestLocal_StatePaths(t *testing.T) {
-	b := &Local{}
+	b := New()
 
 	// Test the defaults
 	path, out, back := b.StatePaths("")
@@ -63,7 +71,7 @@ func TestLocal_StatePaths(t *testing.T) {
 	testEnv := "test_env"
 	path, out, back = b.StatePaths(testEnv)
 
-	expectedPath := filepath.Join(DefaultEnvDir, testEnv, DefaultStateFilename)
+	expectedPath := filepath.Join(DefaultWorkspaceDir, testEnv, DefaultStateFilename)
 	expectedOut := expectedPath
 	expectedBackup := expectedPath + DefaultBackupExtension
 
@@ -86,8 +94,8 @@ func TestLocal_addAndRemoveStates(t *testing.T) {
 	dflt := backend.DefaultStateName
 	expectedStates := []string{dflt}
 
-	b := &Local{}
-	states, err := b.States()
+	b := New()
+	states, err := b.Workspaces()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,11 +105,11 @@ func TestLocal_addAndRemoveStates(t *testing.T) {
 	}
 
 	expectedA := "test_A"
-	if _, err := b.State(expectedA); err != nil {
+	if _, err := b.StateMgr(expectedA); err != nil {
 		t.Fatal(err)
 	}
 
-	states, err = b.States()
+	states, err = b.Workspaces()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,11 +120,11 @@ func TestLocal_addAndRemoveStates(t *testing.T) {
 	}
 
 	expectedB := "test_B"
-	if _, err := b.State(expectedB); err != nil {
+	if _, err := b.StateMgr(expectedB); err != nil {
 		t.Fatal(err)
 	}
 
-	states, err = b.States()
+	states, err = b.Workspaces()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,11 +134,11 @@ func TestLocal_addAndRemoveStates(t *testing.T) {
 		t.Fatalf("expected %q, got %q", expectedStates, states)
 	}
 
-	if err := b.DeleteState(expectedA); err != nil {
+	if err := b.DeleteWorkspace(expectedA); err != nil {
 		t.Fatal(err)
 	}
 
-	states, err = b.States()
+	states, err = b.Workspaces()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,11 +148,11 @@ func TestLocal_addAndRemoveStates(t *testing.T) {
 		t.Fatalf("expected %q, got %q", expectedStates, states)
 	}
 
-	if err := b.DeleteState(expectedB); err != nil {
+	if err := b.DeleteWorkspace(expectedB); err != nil {
 		t.Fatal(err)
 	}
 
-	states, err = b.States()
+	states, err = b.Workspaces()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +162,7 @@ func TestLocal_addAndRemoveStates(t *testing.T) {
 		t.Fatalf("expected %q, got %q", expectedStates, states)
 	}
 
-	if err := b.DeleteState(dflt); err == nil {
+	if err := b.DeleteWorkspace(dflt); err == nil {
 		t.Fatal("expected error deleting default state")
 	}
 }
@@ -163,43 +171,59 @@ func TestLocal_addAndRemoveStates(t *testing.T) {
 // verify it's being called.
 type testDelegateBackend struct {
 	*Local
+
+	// return a sentinel error on these calls
+	stateErr  bool
+	statesErr bool
+	deleteErr bool
 }
 
 var errTestDelegateState = errors.New("State called")
 var errTestDelegateStates = errors.New("States called")
 var errTestDelegateDeleteState = errors.New("Delete called")
 
-func (b *testDelegateBackend) State(name string) (state.State, error) {
-	return nil, errTestDelegateState
+func (b *testDelegateBackend) StateMgr(name string) (statemgr.Full, error) {
+	if b.stateErr {
+		return nil, errTestDelegateState
+	}
+	s := statemgr.NewFilesystem("terraform.tfstate")
+	return s, nil
 }
 
-func (b *testDelegateBackend) States() ([]string, error) {
-	return nil, errTestDelegateStates
+func (b *testDelegateBackend) Workspaces() ([]string, error) {
+	if b.statesErr {
+		return nil, errTestDelegateStates
+	}
+	return []string{"default"}, nil
 }
 
-func (b *testDelegateBackend) DeleteState(name string) error {
-	return errTestDelegateDeleteState
+func (b *testDelegateBackend) DeleteWorkspace(name string) error {
+	if b.deleteErr {
+		return errTestDelegateDeleteState
+	}
+	return nil
 }
 
 // verify that the MultiState methods are dispatched to the correct Backend.
 func TestLocal_multiStateBackend(t *testing.T) {
 	// assign a separate backend where we can read the state
-	b := &Local{
-		Backend: &testDelegateBackend{},
-	}
+	b := NewWithBackend(&testDelegateBackend{
+		stateErr:  true,
+		statesErr: true,
+		deleteErr: true,
+	})
 
-	if _, err := b.State("test"); err != errTestDelegateState {
+	if _, err := b.StateMgr("test"); err != errTestDelegateState {
 		t.Fatal("expected errTestDelegateState, got:", err)
 	}
 
-	if _, err := b.States(); err != errTestDelegateStates {
+	if _, err := b.Workspaces(); err != errTestDelegateStates {
 		t.Fatal("expected errTestDelegateStates, got:", err)
 	}
 
-	if err := b.DeleteState("test"); err != errTestDelegateDeleteState {
+	if err := b.DeleteWorkspace("test"); err != errTestDelegateDeleteState {
 		t.Fatal("expected errTestDelegateDeleteState, got:", err)
 	}
-
 }
 
 // change into a tmp dir and return a deferable func to change back and cleanup

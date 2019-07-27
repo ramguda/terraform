@@ -1,38 +1,34 @@
 package command
 
 import (
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/hashicorp/terraform/terraform"
 	"github.com/mitchellh/cli"
+	"github.com/zclconf/go-cty/cty"
+
+	"github.com/hashicorp/terraform/addrs"
+	"github.com/hashicorp/terraform/states"
 )
 
 func TestOutput(t *testing.T) {
-	originalState := &terraform.State{
-		Modules: []*terraform.ModuleState{
-			{
-				Path: []string{"root"},
-				Outputs: map[string]*terraform.OutputState{
-					"foo": {
-						Value: "bar",
-						Type:  "string",
-					},
-				},
-			},
-		},
-	}
+	originalState := states.BuildState(func(s *states.SyncState) {
+		s.SetOutputValue(
+			addrs.OutputValue{Name: "foo"}.Absolute(addrs.RootModuleInstance),
+			cty.StringVal("bar"),
+			false,
+		)
+	})
 
 	statePath := testStateFile(t, originalState)
 
 	ui := new(cli.MockUi)
 	c := &OutputCommand{
 		Meta: Meta{
-			ContextOpts: testCtxConfig(testProvider()),
-			Ui:          ui,
+			testingOverrides: metaOverridesForProvider(testProvider()),
+			Ui:               ui,
 		},
 	}
 
@@ -50,135 +46,29 @@ func TestOutput(t *testing.T) {
 	}
 }
 
-func TestModuleOutput(t *testing.T) {
-	originalState := &terraform.State{
-		Modules: []*terraform.ModuleState{
-			{
-				Path: []string{"root"},
-				Outputs: map[string]*terraform.OutputState{
-					"foo": {
-						Value: "bar",
-						Type:  "string",
-					},
-				},
-			},
-			{
-				Path: []string{"root", "my_module"},
-				Outputs: map[string]*terraform.OutputState{
-					"blah": {
-						Value: "tastatur",
-						Type:  "string",
-					},
-				},
-			},
-		},
-	}
-
-	statePath := testStateFile(t, originalState)
-
-	ui := new(cli.MockUi)
-	c := &OutputCommand{
-		Meta: Meta{
-			ContextOpts: testCtxConfig(testProvider()),
-			Ui:          ui,
-		},
-	}
-
-	args := []string{
-		"-state", statePath,
-		"-module", "my_module",
-		"blah",
-	}
-
-	if code := c.Run(args); code != 0 {
-		t.Fatalf("bad: \n%s", ui.ErrorWriter.String())
-	}
-
-	actual := strings.TrimSpace(ui.OutputWriter.String())
-	if actual != "tastatur" {
-		t.Fatalf("bad: %#v", actual)
-	}
-}
-
-func TestModuleOutputs(t *testing.T) {
-	originalState := &terraform.State{
-		Modules: []*terraform.ModuleState{
-			{
-				Path: []string{"root"},
-				Outputs: map[string]*terraform.OutputState{
-					"foo": {
-						Value: "bar",
-						Type:  "string",
-					},
-				},
-			},
-			{
-				Path: []string{"root", "my_module"},
-				Outputs: map[string]*terraform.OutputState{
-					"blah": {
-						Value: "tastatur",
-						Type:  "string",
-					},
-				},
-			},
-		},
-	}
-
-	statePath := testStateFile(t, originalState)
-
-	ui := new(cli.MockUi)
-	c := &OutputCommand{
-		Meta: Meta{
-			ContextOpts: testCtxConfig(testProvider()),
-			Ui:          ui,
-		},
-	}
-
-	args := []string{
-		"-state", statePath,
-		"-module", "my_module",
-	}
-
-	if code := c.Run(args); code != 0 {
-		t.Fatalf("bad: \n%s", ui.ErrorWriter.String())
-	}
-
-	actual := strings.TrimSpace(ui.OutputWriter.String())
-	if actual != "blah = tastatur" {
-		t.Fatalf("bad: %#v", actual)
-	}
-}
-
 func TestOutput_nestedListAndMap(t *testing.T) {
-	originalState := &terraform.State{
-		Modules: []*terraform.ModuleState{
-			{
-				Path: []string{"root"},
-				Outputs: map[string]*terraform.OutputState{
-					"foo": {
-						Value: []interface{}{
-							map[string]interface{}{
-								"key":  "value",
-								"key2": "value2",
-							},
-							map[string]interface{}{
-								"key": "value",
-							},
-						},
-						Type: "list",
-					},
-				},
-			},
-		},
-	}
-
+	originalState := states.BuildState(func(s *states.SyncState) {
+		s.SetOutputValue(
+			addrs.OutputValue{Name: "foo"}.Absolute(addrs.RootModuleInstance),
+			cty.ListVal([]cty.Value{
+				cty.MapVal(map[string]cty.Value{
+					"key":  cty.StringVal("value"),
+					"key2": cty.StringVal("value2"),
+				}),
+				cty.MapVal(map[string]cty.Value{
+					"key": cty.StringVal("value"),
+				}),
+			}),
+			false,
+		)
+	})
 	statePath := testStateFile(t, originalState)
 
 	ui := new(cli.MockUi)
 	c := &OutputCommand{
 		Meta: Meta{
-			ContextOpts: testCtxConfig(testProvider()),
-			Ui:          ui,
+			testingOverrides: metaOverridesForProvider(testProvider()),
+			Ui:               ui,
 		},
 	}
 
@@ -190,34 +80,28 @@ func TestOutput_nestedListAndMap(t *testing.T) {
 	}
 
 	actual := strings.TrimSpace(ui.OutputWriter.String())
-	expected := "foo = [\n    {\n        key = value,\n        key2 = value2\n    },\n    {\n        key = value\n    }\n]"
+	expected := "foo = [\n  {\n    \"key\" = \"value\"\n    \"key2\" = \"value2\"\n  },\n  {\n    \"key\" = \"value\"\n  },\n]"
 	if actual != expected {
-		t.Fatalf("bad:\n%#v\n%#v", expected, actual)
+		t.Fatalf("wrong output\ngot:  %#v\nwant: %#v", actual, expected)
 	}
 }
 
 func TestOutput_json(t *testing.T) {
-	originalState := &terraform.State{
-		Modules: []*terraform.ModuleState{
-			{
-				Path: []string{"root"},
-				Outputs: map[string]*terraform.OutputState{
-					"foo": {
-						Value: "bar",
-						Type:  "string",
-					},
-				},
-			},
-		},
-	}
+	originalState := states.BuildState(func(s *states.SyncState) {
+		s.SetOutputValue(
+			addrs.OutputValue{Name: "foo"}.Absolute(addrs.RootModuleInstance),
+			cty.StringVal("bar"),
+			false,
+		)
+	})
 
 	statePath := testStateFile(t, originalState)
 
 	ui := new(cli.MockUi)
 	c := &OutputCommand{
 		Meta: Meta{
-			ContextOpts: testCtxConfig(testProvider()),
-			Ui:          ui,
+			testingOverrides: metaOverridesForProvider(testProvider()),
+			Ui:               ui,
 		},
 	}
 
@@ -230,34 +114,76 @@ func TestOutput_json(t *testing.T) {
 	}
 
 	actual := strings.TrimSpace(ui.OutputWriter.String())
-	expected := "{\n    \"foo\": {\n        \"sensitive\": false,\n        \"type\": \"string\",\n        \"value\": \"bar\"\n    }\n}"
+	expected := "{\n  \"foo\": {\n    \"sensitive\": false,\n    \"type\": \"string\",\n    \"value\": \"bar\"\n  }\n}"
+	if actual != expected {
+		t.Fatalf("wrong output\ngot:  %#v\nwant: %#v", actual, expected)
+	}
+}
+
+func TestOutput_emptyOutputsErr(t *testing.T) {
+	originalState := states.NewState()
+	statePath := testStateFile(t, originalState)
+
+	p := testProvider()
+	ui := new(cli.MockUi)
+	c := &OutputCommand{
+		Meta: Meta{
+			testingOverrides: metaOverridesForProvider(p),
+			Ui:               ui,
+		},
+	}
+
+	args := []string{
+		"-state", statePath,
+	}
+	if code := c.Run(args); code != 1 {
+		t.Fatalf("bad: \n%s", ui.ErrorWriter.String())
+	}
+}
+
+func TestOutput_jsonEmptyOutputs(t *testing.T) {
+	originalState := states.NewState()
+	statePath := testStateFile(t, originalState)
+
+	p := testProvider()
+	ui := new(cli.MockUi)
+	c := &OutputCommand{
+		Meta: Meta{
+			testingOverrides: metaOverridesForProvider(p),
+			Ui:               ui,
+		},
+	}
+
+	args := []string{
+		"-state", statePath,
+		"-json",
+	}
+	if code := c.Run(args); code != 0 {
+		t.Fatalf("bad: \n%s", ui.ErrorWriter.String())
+	}
+
+	actual := strings.TrimSpace(ui.OutputWriter.String())
+	expected := "{}"
 	if actual != expected {
 		t.Fatalf("bad:\n%#v\n%#v", expected, actual)
 	}
 }
 
 func TestMissingModuleOutput(t *testing.T) {
-	originalState := &terraform.State{
-		Modules: []*terraform.ModuleState{
-			{
-				Path: []string{"root"},
-				Outputs: map[string]*terraform.OutputState{
-					"foo": {
-						Value: "bar",
-						Type:  "string",
-					},
-				},
-			},
-		},
-	}
-
+	originalState := states.BuildState(func(s *states.SyncState) {
+		s.SetOutputValue(
+			addrs.OutputValue{Name: "foo"}.Absolute(addrs.RootModuleInstance),
+			cty.StringVal("bar"),
+			false,
+		)
+	})
 	statePath := testStateFile(t, originalState)
 
 	ui := new(cli.MockUi)
 	c := &OutputCommand{
 		Meta: Meta{
-			ContextOpts: testCtxConfig(testProvider()),
-			Ui:          ui,
+			testingOverrides: metaOverridesForProvider(testProvider()),
+			Ui:               ui,
 		},
 	}
 
@@ -273,27 +199,20 @@ func TestMissingModuleOutput(t *testing.T) {
 }
 
 func TestOutput_badVar(t *testing.T) {
-	originalState := &terraform.State{
-		Modules: []*terraform.ModuleState{
-			{
-				Path: []string{"root"},
-				Outputs: map[string]*terraform.OutputState{
-					"foo": {
-						Value: "bar",
-						Type:  "string",
-					},
-				},
-			},
-		},
-	}
-
+	originalState := states.BuildState(func(s *states.SyncState) {
+		s.SetOutputValue(
+			addrs.OutputValue{Name: "foo"}.Absolute(addrs.RootModuleInstance),
+			cty.StringVal("bar"),
+			false,
+		)
+	})
 	statePath := testStateFile(t, originalState)
 
 	ui := new(cli.MockUi)
 	c := &OutputCommand{
 		Meta: Meta{
-			ContextOpts: testCtxConfig(testProvider()),
-			Ui:          ui,
+			testingOverrides: metaOverridesForProvider(testProvider()),
+			Ui:               ui,
 		},
 	}
 
@@ -307,31 +226,25 @@ func TestOutput_badVar(t *testing.T) {
 }
 
 func TestOutput_blank(t *testing.T) {
-	originalState := &terraform.State{
-		Modules: []*terraform.ModuleState{
-			{
-				Path: []string{"root"},
-				Outputs: map[string]*terraform.OutputState{
-					"foo": {
-						Value: "bar",
-						Type:  "string",
-					},
-					"name": {
-						Value: "john-doe",
-						Type:  "string",
-					},
-				},
-			},
-		},
-	}
-
+	originalState := states.BuildState(func(s *states.SyncState) {
+		s.SetOutputValue(
+			addrs.OutputValue{Name: "foo"}.Absolute(addrs.RootModuleInstance),
+			cty.StringVal("bar"),
+			false,
+		)
+		s.SetOutputValue(
+			addrs.OutputValue{Name: "name"}.Absolute(addrs.RootModuleInstance),
+			cty.StringVal("john-doe"),
+			false,
+		)
+	})
 	statePath := testStateFile(t, originalState)
 
 	ui := new(cli.MockUi)
 	c := &OutputCommand{
 		Meta: Meta{
-			ContextOpts: testCtxConfig(testProvider()),
-			Ui:          ui,
+			testingOverrides: metaOverridesForProvider(testProvider()),
+			Ui:               ui,
 		},
 	}
 
@@ -347,7 +260,7 @@ func TestOutput_blank(t *testing.T) {
 	expectedOutput := "foo = bar\nname = john-doe\n"
 	output := ui.OutputWriter.String()
 	if output != expectedOutput {
-		t.Fatalf("Expected output: %#v\ngiven: %#v", expectedOutput, output)
+		t.Fatalf("wrong output\ngot:  %#v\nwant: %#v", output, expectedOutput)
 	}
 }
 
@@ -355,8 +268,8 @@ func TestOutput_manyArgs(t *testing.T) {
 	ui := new(cli.MockUi)
 	c := &OutputCommand{
 		Meta: Meta{
-			ContextOpts: testCtxConfig(testProvider()),
-			Ui:          ui,
+			testingOverrides: metaOverridesForProvider(testProvider()),
+			Ui:               ui,
 		},
 	}
 
@@ -373,8 +286,8 @@ func TestOutput_noArgs(t *testing.T) {
 	ui := new(cli.MockUi)
 	c := &OutputCommand{
 		Meta: Meta{
-			ContextOpts: testCtxConfig(testProvider()),
-			Ui:          ui,
+			testingOverrides: metaOverridesForProvider(testProvider()),
+			Ui:               ui,
 		},
 	}
 
@@ -385,14 +298,14 @@ func TestOutput_noArgs(t *testing.T) {
 }
 
 func TestOutput_noState(t *testing.T) {
-	originalState := &terraform.State{}
+	originalState := states.NewState()
 	statePath := testStateFile(t, originalState)
 
 	ui := new(cli.MockUi)
 	c := &OutputCommand{
 		Meta: Meta{
-			ContextOpts: testCtxConfig(testProvider()),
-			Ui:          ui,
+			testingOverrides: metaOverridesForProvider(testProvider()),
+			Ui:               ui,
 		},
 	}
 
@@ -406,22 +319,15 @@ func TestOutput_noState(t *testing.T) {
 }
 
 func TestOutput_noVars(t *testing.T) {
-	originalState := &terraform.State{
-		Modules: []*terraform.ModuleState{
-			{
-				Path:    []string{"root"},
-				Outputs: map[string]*terraform.OutputState{},
-			},
-		},
-	}
+	originalState := states.NewState()
 
 	statePath := testStateFile(t, originalState)
 
 	ui := new(cli.MockUi)
 	c := &OutputCommand{
 		Meta: Meta{
-			ContextOpts: testCtxConfig(testProvider()),
-			Ui:          ui,
+			testingOverrides: metaOverridesForProvider(testProvider()),
+			Ui:               ui,
 		},
 	}
 
@@ -435,33 +341,24 @@ func TestOutput_noVars(t *testing.T) {
 }
 
 func TestOutput_stateDefault(t *testing.T) {
-	originalState := &terraform.State{
-		Modules: []*terraform.ModuleState{
-			{
-				Path: []string{"root"},
-				Outputs: map[string]*terraform.OutputState{
-					"foo": {
-						Value: "bar",
-						Type:  "string",
-					},
-				},
-			},
-		},
-	}
+	originalState := states.BuildState(func(s *states.SyncState) {
+		s.SetOutputValue(
+			addrs.OutputValue{Name: "foo"}.Absolute(addrs.RootModuleInstance),
+			cty.StringVal("bar"),
+			false,
+		)
+	})
 
 	// Write the state file in a temporary directory with the
 	// default filename.
-	td, err := ioutil.TempDir("", "tf")
-	if err != nil {
-		t.Fatalf("err: %s", err)
-	}
+	td := testTempDir(t)
 	statePath := filepath.Join(td, DefaultStateFilename)
 
 	f, err := os.Create(statePath)
 	if err != nil {
 		t.Fatalf("err: %s", err)
 	}
-	err = terraform.WriteState(originalState, f)
+	err = writeStateForTesting(originalState, f)
 	f.Close()
 	if err != nil {
 		t.Fatalf("err: %s", err)
@@ -480,8 +377,8 @@ func TestOutput_stateDefault(t *testing.T) {
 	ui := new(cli.MockUi)
 	c := &OutputCommand{
 		Meta: Meta{
-			ContextOpts: testCtxConfig(testProvider()),
-			Ui:          ui,
+			testingOverrides: metaOverridesForProvider(testProvider()),
+			Ui:               ui,
 		},
 	}
 
