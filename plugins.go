@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: MPL-2.0
+
 package main
 
 import (
@@ -5,6 +8,8 @@ import (
 	"log"
 	"path/filepath"
 	"runtime"
+
+	"github.com/hashicorp/terraform/internal/command/cliconfig"
 )
 
 // globalPluginDirs returns directories that should be searched for
@@ -16,7 +21,7 @@ import (
 func globalPluginDirs() []string {
 	var ret []string
 	// Look in ~/.terraform.d/plugins/ , or its equivalent on non-UNIX
-	dir, err := ConfigDir()
+	dir, err := cliconfig.ConfigDir()
 	if err != nil {
 		log.Printf("[ERROR] Error finding global config directory: %s", err)
 	} else {

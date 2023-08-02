@@ -1,34 +1,37 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: MPL-2.0
+
 package initwd
 
 import (
+	"bytes"
+	"context"
 	"flag"
 	"fmt"
 	"io/ioutil"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/davecgh/go-spew/spew"
 	"github.com/go-test/deep"
+	"github.com/google/go-cmp/cmp"
 	version "github.com/hashicorp/go-version"
-	"github.com/hashicorp/terraform/configs"
-	"github.com/hashicorp/terraform/configs/configload"
-	"github.com/hashicorp/terraform/helper/logging"
-	"github.com/hashicorp/terraform/registry"
-	"github.com/hashicorp/terraform/tfdiags"
+	svchost "github.com/hashicorp/terraform-svchost"
+
+	"github.com/hashicorp/terraform/internal/addrs"
+	"github.com/hashicorp/terraform/internal/configs"
+	"github.com/hashicorp/terraform/internal/configs/configload"
+	"github.com/hashicorp/terraform/internal/copy"
+	"github.com/hashicorp/terraform/internal/registry"
+	"github.com/hashicorp/terraform/internal/tfdiags"
+
+	_ "github.com/hashicorp/terraform/internal/logging"
 )
 
 func TestMain(m *testing.M) {
 	flag.Parse()
-	if testing.Verbose() {
-		// if we're verbose, use the logging requested by TF_LOG
-		logging.SetOutput()
-	} else {
-		// otherwise silence all logs
-		log.SetOutput(ioutil.Discard)
-	}
-
 	os.Exit(m.Run())
 }
 
@@ -40,8 +43,10 @@ func TestModuleInstaller(t *testing.T) {
 	hooks := &testInstallHooks{}
 
 	modulesDir := filepath.Join(dir, ".terraform/modules")
-	inst := NewModuleInstaller(modulesDir, nil)
-	_, diags := inst.InstallModules(".", false, hooks)
+	loader, close := configload.NewLoaderForTests(t)
+	defer close()
+	inst := NewModuleInstaller(modulesDir, loader, nil)
+	_, diags := inst.InstallModules(context.Background(), ".", "tests", false, hooks)
 	assertNoDiagnostics(t, diags)
 
 	wantCalls := []testInstallHookCall{
@@ -101,13 +106,165 @@ func TestModuleInstaller_error(t *testing.T) {
 	hooks := &testInstallHooks{}
 
 	modulesDir := filepath.Join(dir, ".terraform/modules")
-	inst := NewModuleInstaller(modulesDir, nil)
-	_, diags := inst.InstallModules(".", false, hooks)
+
+	loader, close := configload.NewLoaderForTests(t)
+	defer close()
+	inst := NewModuleInstaller(modulesDir, loader, nil)
+	_, diags := inst.InstallModules(context.Background(), ".", "tests", false, hooks)
 
 	if !diags.HasErrors() {
 		t.Fatal("expected error")
 	} else {
-		assertDiagnosticSummary(t, diags, "Module not found")
+		assertDiagnosticSummary(t, diags, "Invalid module source address")
+	}
+}
+
+func TestModuleInstaller_emptyModuleName(t *testing.T) {
+	fixtureDir := filepath.Clean("testdata/empty-module-name")
+	dir, done := tempChdir(t, fixtureDir)
+	defer done()
+
+	hooks := &testInstallHooks{}
+
+	modulesDir := filepath.Join(dir, ".terraform/modules")
+
+	loader, close := configload.NewLoaderForTests(t)
+	defer close()
+	inst := NewModuleInstaller(modulesDir, loader, nil)
+	_, diags := inst.InstallModules(context.Background(), ".", "tests", false, hooks)
+
+	if !diags.HasErrors() {
+		t.Fatal("expected error")
+	} else {
+		assertDiagnosticSummary(t, diags, "Invalid module instance name")
+	}
+}
+
+func TestModuleInstaller_packageEscapeError(t *testing.T) {
+	fixtureDir := filepath.Clean("testdata/load-module-package-escape")
+	dir, done := tempChdir(t, fixtureDir)
+	defer done()
+
+	// For this particular test we need an absolute path in the root module
+	// that must actually resolve to our temporary directory in "dir", so
+	// we need to do a little rewriting. We replace the arbitrary placeholder
+	// %%BASE%% with the temporary directory path.
+	{
+		rootFilename := filepath.Join(dir, "package-escape.tf")
+		template, err := ioutil.ReadFile(rootFilename)
+		if err != nil {
+			t.Fatal(err)
+		}
+		final := bytes.ReplaceAll(template, []byte("%%BASE%%"), []byte(filepath.ToSlash(dir)))
+		err = ioutil.WriteFile(rootFilename, final, 0644)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	hooks := &testInstallHooks{}
+
+	modulesDir := filepath.Join(dir, ".terraform/modules")
+
+	loader, close := configload.NewLoaderForTests(t)
+	defer close()
+	inst := NewModuleInstaller(modulesDir, loader, nil)
+	_, diags := inst.InstallModules(context.Background(), ".", "tests", false, hooks)
+
+	if !diags.HasErrors() {
+		t.Fatal("expected error")
+	} else {
+		assertDiagnosticSummary(t, diags, "Local module path escapes module package")
+	}
+}
+
+func TestModuleInstaller_explicitPackageBoundary(t *testing.T) {
+	fixtureDir := filepath.Clean("testdata/load-module-package-prefix")
+	dir, done := tempChdir(t, fixtureDir)
+	defer done()
+
+	// For this particular test we need an absolute path in the root module
+	// that must actually resolve to our temporary directory in "dir", so
+	// we need to do a little rewriting. We replace the arbitrary placeholder
+	// %%BASE%% with the temporary directory path.
+	{
+		rootFilename := filepath.Join(dir, "package-prefix.tf")
+		template, err := ioutil.ReadFile(rootFilename)
+		if err != nil {
+			t.Fatal(err)
+		}
+		final := bytes.ReplaceAll(template, []byte("%%BASE%%"), []byte(filepath.ToSlash(dir)))
+		err = ioutil.WriteFile(rootFilename, final, 0644)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	hooks := &testInstallHooks{}
+
+	modulesDir := filepath.Join(dir, ".terraform/modules")
+
+	loader, close := configload.NewLoaderForTests(t)
+	defer close()
+	inst := NewModuleInstaller(modulesDir, loader, nil)
+	_, diags := inst.InstallModules(context.Background(), ".", "tests", false, hooks)
+
+	if diags.HasErrors() {
+		t.Fatalf("unexpected errors\n%s", diags.Err().Error())
+	}
+}
+
+func TestModuleInstaller_ExactMatchPrerelease(t *testing.T) {
+	if os.Getenv("TF_ACC") == "" {
+		t.Skip("this test accesses registry.terraform.io and github.com; set TF_ACC=1 to run it")
+	}
+
+	fixtureDir := filepath.Clean("testdata/prerelease-version-constraint-match")
+	dir, done := tempChdir(t, fixtureDir)
+	defer done()
+
+	hooks := &testInstallHooks{}
+
+	modulesDir := filepath.Join(dir, ".terraform/modules")
+
+	loader, close := configload.NewLoaderForTests(t)
+	defer close()
+	inst := NewModuleInstaller(modulesDir, loader, registry.NewClient(nil, nil))
+	cfg, diags := inst.InstallModules(context.Background(), ".", "tests", false, hooks)
+
+	if diags.HasErrors() {
+		t.Fatalf("found unexpected errors: %s", diags.Err())
+	}
+
+	if !cfg.Children["acctest_exact"].Version.Equal(version.Must(version.NewVersion("v0.0.3-alpha.1"))) {
+		t.Fatalf("expected version %s but found version %s", "v0.0.3-alpha.1", cfg.Version.String())
+	}
+}
+
+func TestModuleInstaller_PartialMatchPrerelease(t *testing.T) {
+	if os.Getenv("TF_ACC") == "" {
+		t.Skip("this test accesses registry.terraform.io and github.com; set TF_ACC=1 to run it")
+	}
+
+	fixtureDir := filepath.Clean("testdata/prerelease-version-constraint")
+	dir, done := tempChdir(t, fixtureDir)
+	defer done()
+
+	hooks := &testInstallHooks{}
+
+	modulesDir := filepath.Join(dir, ".terraform/modules")
+
+	loader, close := configload.NewLoaderForTests(t)
+	defer close()
+	inst := NewModuleInstaller(modulesDir, loader, registry.NewClient(nil, nil))
+	cfg, diags := inst.InstallModules(context.Background(), ".", "tests", false, hooks)
+
+	if diags.HasErrors() {
+		t.Fatalf("found unexpected errors: %s", diags.Err())
+	}
+
+	if !cfg.Children["acctest_partial"].Version.Equal(version.Must(version.NewVersion("v0.0.2"))) {
+		t.Fatalf("expected version %s but found version %s", "v0.0.2", cfg.Version.String())
 	}
 }
 
@@ -119,13 +276,21 @@ func TestModuleInstaller_invalid_version_constraint_error(t *testing.T) {
 	hooks := &testInstallHooks{}
 
 	modulesDir := filepath.Join(dir, ".terraform/modules")
-	inst := NewModuleInstaller(modulesDir, nil)
-	_, diags := inst.InstallModules(".", false, hooks)
+
+	loader, close := configload.NewLoaderForTests(t)
+	defer close()
+	inst := NewModuleInstaller(modulesDir, loader, nil)
+	_, diags := inst.InstallModules(context.Background(), ".", "tests", false, hooks)
 
 	if !diags.HasErrors() {
 		t.Fatal("expected error")
 	} else {
-		assertDiagnosticSummary(t, diags, "Invalid version constraint")
+		// We use the presence of the "version" argument as a heuristic for
+		// user intent to use a registry module, and so we intentionally catch
+		// this as an invalid registry module address rather than an invalid
+		// version constraint, so we can surface the specific address parsing
+		// error instead of a generic version constraint error.
+		assertDiagnosticSummary(t, diags, "Invalid registry module source address")
 	}
 }
 
@@ -137,13 +302,21 @@ func TestModuleInstaller_invalidVersionConstraintGetter(t *testing.T) {
 	hooks := &testInstallHooks{}
 
 	modulesDir := filepath.Join(dir, ".terraform/modules")
-	inst := NewModuleInstaller(modulesDir, nil)
-	_, diags := inst.InstallModules(".", false, hooks)
+
+	loader, close := configload.NewLoaderForTests(t)
+	defer close()
+	inst := NewModuleInstaller(modulesDir, loader, nil)
+	_, diags := inst.InstallModules(context.Background(), ".", "tests", false, hooks)
 
 	if !diags.HasErrors() {
 		t.Fatal("expected error")
 	} else {
-		assertDiagnosticSummary(t, diags, "Invalid version constraint")
+		// We use the presence of the "version" argument as a heuristic for
+		// user intent to use a registry module, and so we intentionally catch
+		// this as an invalid registry module address rather than an invalid
+		// version constraint, so we can surface the specific address parsing
+		// error instead of a generic version constraint error.
+		assertDiagnosticSummary(t, diags, "Invalid registry module source address")
 	}
 }
 
@@ -155,13 +328,21 @@ func TestModuleInstaller_invalidVersionConstraintLocal(t *testing.T) {
 	hooks := &testInstallHooks{}
 
 	modulesDir := filepath.Join(dir, ".terraform/modules")
-	inst := NewModuleInstaller(modulesDir, nil)
-	_, diags := inst.InstallModules(".", false, hooks)
+
+	loader, close := configload.NewLoaderForTests(t)
+	defer close()
+	inst := NewModuleInstaller(modulesDir, loader, nil)
+	_, diags := inst.InstallModules(context.Background(), ".", "tests", false, hooks)
 
 	if !diags.HasErrors() {
 		t.Fatal("expected error")
 	} else {
-		assertDiagnosticSummary(t, diags, "Invalid version constraint")
+		// We use the presence of the "version" argument as a heuristic for
+		// user intent to use a registry module, and so we intentionally catch
+		// this as an invalid registry module address rather than an invalid
+		// version constraint, so we can surface the specific address parsing
+		// error instead of a generic version constraint error.
+		assertDiagnosticSummary(t, diags, "Invalid registry module source address")
 	}
 }
 
@@ -173,8 +354,11 @@ func TestModuleInstaller_symlink(t *testing.T) {
 	hooks := &testInstallHooks{}
 
 	modulesDir := filepath.Join(dir, ".terraform/modules")
-	inst := NewModuleInstaller(modulesDir, nil)
-	_, diags := inst.InstallModules(".", false, hooks)
+
+	loader, close := configload.NewLoaderForTests(t)
+	defer close()
+	inst := NewModuleInstaller(modulesDir, loader, nil)
+	_, diags := inst.InstallModules(context.Background(), ".", "tests", false, hooks)
 	assertNoDiagnostics(t, diags)
 
 	wantCalls := []testInstallHookCall{
@@ -232,13 +416,25 @@ func TestLoaderInstallModules_registry(t *testing.T) {
 	}
 
 	fixtureDir := filepath.Clean("testdata/registry-modules")
-	dir, done := tempChdir(t, fixtureDir)
+	tmpDir, done := tempChdir(t, fixtureDir)
+	// the module installer runs filepath.EvalSymlinks() on the destination
+	// directory before copying files, and the resultant directory is what is
+	// returned by the install hooks. Without this, tests could fail on machines
+	// where the default temp dir was a symlink.
+	dir, err := filepath.EvalSymlinks(tmpDir)
+	if err != nil {
+		t.Error(err)
+	}
+
 	defer done()
 
 	hooks := &testInstallHooks{}
 	modulesDir := filepath.Join(dir, ".terraform/modules")
-	inst := NewModuleInstaller(modulesDir, registry.NewClient(nil, nil))
-	_, diags := inst.InstallModules(dir, false, hooks)
+
+	loader, close := configload.NewLoaderForTests(t)
+	defer close()
+	inst := NewModuleInstaller(modulesDir, loader, registry.NewClient(nil, nil))
+	_, diags := inst.InstallModules(context.Background(), dir, "tests", false, hooks)
 	assertNoDiagnostics(t, diags)
 
 	v := version.Must(version.NewVersion("0.0.1"))
@@ -251,14 +447,25 @@ func TestLoaderInstallModules_registry(t *testing.T) {
 		{
 			Name:        "Download",
 			ModuleAddr:  "acctest_child_a",
-			PackageAddr: "hashicorp/module-installer-acctest/aws", // intentionally excludes the subdir because we're downloading the whole package here
+			PackageAddr: "registry.terraform.io/hashicorp/module-installer-acctest/aws", // intentionally excludes the subdir because we're downloading the whole package here
 			Version:     v,
 		},
 		{
 			Name:       "Install",
 			ModuleAddr: "acctest_child_a",
 			Version:    v,
-			LocalPath:  filepath.Join(dir, ".terraform/modules/acctest_child_a/hashicorp-terraform-aws-module-installer-acctest-853d038/modules/child_a"),
+			// NOTE: This local path and the other paths derived from it below
+			// can vary depending on how the registry is implemented. At the
+			// time of writing this test, registry.terraform.io returns
+			// git repository source addresses and so this path refers to the
+			// root of the git clone, but historically the registry referred
+			// to GitHub-provided tar archives which meant that there was an
+			// extra level of subdirectory here for the typical directory
+			// nesting in tar archives, which would've been reflected as
+			// an extra segment on this path. If this test fails due to an
+			// additional path segment in future, then a change to the upstream
+			// registry might be the root cause.
+			LocalPath: filepath.Join(dir, ".terraform/modules/acctest_child_a/modules/child_a"),
 		},
 
 		// acctest_child_a.child_b
@@ -266,35 +473,35 @@ func TestLoaderInstallModules_registry(t *testing.T) {
 		{
 			Name:       "Install",
 			ModuleAddr: "acctest_child_a.child_b",
-			LocalPath:  filepath.Join(dir, ".terraform/modules/acctest_child_a/hashicorp-terraform-aws-module-installer-acctest-853d038/modules/child_b"),
+			LocalPath:  filepath.Join(dir, ".terraform/modules/acctest_child_a/modules/child_b"),
 		},
 
 		// acctest_child_b accesses //modules/child_b directly
 		{
 			Name:        "Download",
 			ModuleAddr:  "acctest_child_b",
-			PackageAddr: "hashicorp/module-installer-acctest/aws", // intentionally excludes the subdir because we're downloading the whole package here
+			PackageAddr: "registry.terraform.io/hashicorp/module-installer-acctest/aws", // intentionally excludes the subdir because we're downloading the whole package here
 			Version:     v,
 		},
 		{
 			Name:       "Install",
 			ModuleAddr: "acctest_child_b",
 			Version:    v,
-			LocalPath:  filepath.Join(dir, ".terraform/modules/acctest_child_b/hashicorp-terraform-aws-module-installer-acctest-853d038/modules/child_b"),
+			LocalPath:  filepath.Join(dir, ".terraform/modules/acctest_child_b/modules/child_b"),
 		},
 
 		// acctest_root
 		{
 			Name:        "Download",
 			ModuleAddr:  "acctest_root",
-			PackageAddr: "hashicorp/module-installer-acctest/aws",
+			PackageAddr: "registry.terraform.io/hashicorp/module-installer-acctest/aws",
 			Version:     v,
 		},
 		{
 			Name:       "Install",
 			ModuleAddr: "acctest_root",
 			Version:    v,
-			LocalPath:  filepath.Join(dir, ".terraform/modules/acctest_root/hashicorp-terraform-aws-module-installer-acctest-853d038"),
+			LocalPath:  filepath.Join(dir, ".terraform/modules/acctest_root"),
 		},
 
 		// acctest_root.child_a
@@ -302,7 +509,7 @@ func TestLoaderInstallModules_registry(t *testing.T) {
 		{
 			Name:       "Install",
 			ModuleAddr: "acctest_root.child_a",
-			LocalPath:  filepath.Join(dir, ".terraform/modules/acctest_root/hashicorp-terraform-aws-module-installer-acctest-853d038/modules/child_a"),
+			LocalPath:  filepath.Join(dir, ".terraform/modules/acctest_root/modules/child_a"),
 		},
 
 		// acctest_root.child_a.child_b
@@ -310,15 +517,29 @@ func TestLoaderInstallModules_registry(t *testing.T) {
 		{
 			Name:       "Install",
 			ModuleAddr: "acctest_root.child_a.child_b",
-			LocalPath:  filepath.Join(dir, ".terraform/modules/acctest_root/hashicorp-terraform-aws-module-installer-acctest-853d038/modules/child_b"),
+			LocalPath:  filepath.Join(dir, ".terraform/modules/acctest_root/modules/child_b"),
 		},
 	}
 
-	if assertResultDeepEqual(t, hooks.Calls, wantCalls) {
-		return
+	if diff := cmp.Diff(wantCalls, hooks.Calls); diff != "" {
+		t.Fatalf("wrong installer calls\n%s", diff)
 	}
 
-	loader, err := configload.NewLoader(&configload.Config{
+	//check that the registry reponses were cached
+	packageAddr := addrs.ModuleRegistryPackage{
+		Host:         svchost.Hostname("registry.terraform.io"),
+		Namespace:    "hashicorp",
+		Name:         "module-installer-acctest",
+		TargetSystem: "aws",
+	}
+	if _, ok := inst.registryPackageVersions[packageAddr]; !ok {
+		t.Errorf("module versions cache was not populated\ngot: %s\nwant: key hashicorp/module-installer-acctest/aws", spew.Sdump(inst.registryPackageVersions))
+	}
+	if _, ok := inst.registryPackageSources[moduleVersion{module: packageAddr, version: "0.0.1"}]; !ok {
+		t.Errorf("module download url cache was not populated\ngot: %s", spew.Sdump(inst.registryPackageSources))
+	}
+
+	loader, err = configload.NewLoader(&configload.Config{
 		ModulesDir: modulesDir,
 	})
 	if err != nil {
@@ -359,13 +580,24 @@ func TestLoaderInstallModules_goGetter(t *testing.T) {
 	}
 
 	fixtureDir := filepath.Clean("testdata/go-getter-modules")
-	dir, done := tempChdir(t, fixtureDir)
+	tmpDir, done := tempChdir(t, fixtureDir)
+	// the module installer runs filepath.EvalSymlinks() on the destination
+	// directory before copying files, and the resultant directory is what is
+	// returned by the install hooks. Without this, tests could fail on machines
+	// where the default temp dir was a symlink.
+	dir, err := filepath.EvalSymlinks(tmpDir)
+	if err != nil {
+		t.Error(err)
+	}
 	defer done()
 
 	hooks := &testInstallHooks{}
 	modulesDir := filepath.Join(dir, ".terraform/modules")
-	inst := NewModuleInstaller(modulesDir, registry.NewClient(nil, nil))
-	_, diags := inst.InstallModules(dir, false, hooks)
+
+	loader, close := configload.NewLoaderForTests(t)
+	defer close()
+	inst := NewModuleInstaller(modulesDir, loader, registry.NewClient(nil, nil))
+	_, diags := inst.InstallModules(context.Background(), dir, "tests", false, hooks)
 	assertNoDiagnostics(t, diags)
 
 	wantCalls := []testInstallHookCall{
@@ -376,7 +608,7 @@ func TestLoaderInstallModules_goGetter(t *testing.T) {
 		{
 			Name:        "Download",
 			ModuleAddr:  "acctest_child_a",
-			PackageAddr: "github.com/hashicorp/terraform-aws-module-installer-acctest?ref=v0.0.1", // intentionally excludes the subdir because we're downloading the whole repo here
+			PackageAddr: "git::https://github.com/hashicorp/terraform-aws-module-installer-acctest.git?ref=v0.0.1", // intentionally excludes the subdir because we're downloading the whole repo here
 		},
 		{
 			Name:       "Install",
@@ -396,7 +628,7 @@ func TestLoaderInstallModules_goGetter(t *testing.T) {
 		{
 			Name:        "Download",
 			ModuleAddr:  "acctest_child_b",
-			PackageAddr: "github.com/hashicorp/terraform-aws-module-installer-acctest?ref=v0.0.1", // intentionally excludes the subdir because we're downloading the whole package here
+			PackageAddr: "git::https://github.com/hashicorp/terraform-aws-module-installer-acctest.git?ref=v0.0.1", // intentionally excludes the subdir because we're downloading the whole package here
 		},
 		{
 			Name:       "Install",
@@ -408,7 +640,7 @@ func TestLoaderInstallModules_goGetter(t *testing.T) {
 		{
 			Name:        "Download",
 			ModuleAddr:  "acctest_root",
-			PackageAddr: "github.com/hashicorp/terraform-aws-module-installer-acctest?ref=v0.0.1",
+			PackageAddr: "git::https://github.com/hashicorp/terraform-aws-module-installer-acctest.git?ref=v0.0.1",
 		},
 		{
 			Name:       "Install",
@@ -433,11 +665,11 @@ func TestLoaderInstallModules_goGetter(t *testing.T) {
 		},
 	}
 
-	if assertResultDeepEqual(t, hooks.Calls, wantCalls) {
-		return
+	if diff := cmp.Diff(wantCalls, hooks.Calls); diff != "" {
+		t.Fatalf("wrong installer calls\n%s", diff)
 	}
 
-	loader, err := configload.NewLoader(&configload.Config{
+	loader, err = configload.NewLoader(&configload.Config{
 		ModulesDir: modulesDir,
 	})
 	if err != nil {
@@ -470,6 +702,159 @@ func TestLoaderInstallModules_goGetter(t *testing.T) {
 	})
 	assertResultDeepEqual(t, gotTraces, wantTraces)
 
+}
+
+func TestModuleInstaller_fromTests(t *testing.T) {
+	fixtureDir := filepath.Clean("testdata/local-module-from-test")
+	dir, done := tempChdir(t, fixtureDir)
+	defer done()
+
+	hooks := &testInstallHooks{}
+
+	modulesDir := filepath.Join(dir, ".terraform/modules")
+	loader, close := configload.NewLoaderForTests(t)
+	defer close()
+	inst := NewModuleInstaller(modulesDir, loader, nil)
+	_, diags := inst.InstallModules(context.Background(), ".", "tests", false, hooks)
+	assertNoDiagnostics(t, diags)
+
+	wantCalls := []testInstallHookCall{
+		{
+			Name:        "Install",
+			ModuleAddr:  "test.tests.main.setup",
+			PackageAddr: "",
+			LocalPath:   "setup",
+		},
+	}
+
+	if assertResultDeepEqual(t, hooks.Calls, wantCalls) {
+		return
+	}
+
+	loader, err := configload.NewLoader(&configload.Config{
+		ModulesDir: modulesDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Make sure the configuration is loadable now.
+	// (This ensures that correct information is recorded in the manifest.)
+	config, loadDiags := loader.LoadConfigWithTests(".", "tests")
+	assertNoDiagnostics(t, tfdiags.Diagnostics{}.Append(loadDiags))
+
+	if config.Module.Tests["tests/main.tftest.hcl"].Runs[0].ConfigUnderTest == nil {
+		t.Fatalf("should have loaded config into the relevant run block but did not")
+	}
+}
+
+func TestLoadInstallModules_registryFromTest(t *testing.T) {
+	if os.Getenv("TF_ACC") == "" {
+		t.Skip("this test accesses registry.terraform.io and github.com; set TF_ACC=1 to run it")
+	}
+
+	fixtureDir := filepath.Clean("testdata/registry-module-from-test")
+	tmpDir, done := tempChdir(t, fixtureDir)
+	// the module installer runs filepath.EvalSymlinks() on the destination
+	// directory before copying files, and the resultant directory is what is
+	// returned by the install hooks. Without this, tests could fail on machines
+	// where the default temp dir was a symlink.
+	dir, err := filepath.EvalSymlinks(tmpDir)
+	if err != nil {
+		t.Error(err)
+	}
+
+	defer done()
+
+	hooks := &testInstallHooks{}
+	modulesDir := filepath.Join(dir, ".terraform/modules")
+
+	loader, close := configload.NewLoaderForTests(t)
+	defer close()
+	inst := NewModuleInstaller(modulesDir, loader, registry.NewClient(nil, nil))
+	_, diags := inst.InstallModules(context.Background(), dir, "tests", false, hooks)
+	assertNoDiagnostics(t, diags)
+
+	v := version.Must(version.NewVersion("0.0.1"))
+	wantCalls := []testInstallHookCall{
+		// the configuration builder visits each level of calls in lexicographical
+		// order by name, so the following list is kept in the same order.
+
+		// setup access acctest directly.
+		{
+			Name:        "Download",
+			ModuleAddr:  "test.main.setup",
+			PackageAddr: "registry.terraform.io/hashicorp/module-installer-acctest/aws", // intentionally excludes the subdir because we're downloading the whole package here
+			Version:     v,
+		},
+		{
+			Name:       "Install",
+			ModuleAddr: "test.main.setup",
+			Version:    v,
+			// NOTE: This local path and the other paths derived from it below
+			// can vary depending on how the registry is implemented. At the
+			// time of writing this test, registry.terraform.io returns
+			// git repository source addresses and so this path refers to the
+			// root of the git clone, but historically the registry referred
+			// to GitHub-provided tar archives which meant that there was an
+			// extra level of subdirectory here for the typical directory
+			// nesting in tar archives, which would've been reflected as
+			// an extra segment on this path. If this test fails due to an
+			// additional path segment in future, then a change to the upstream
+			// registry might be the root cause.
+			LocalPath: filepath.Join(dir, ".terraform/modules/test.main.setup"),
+		},
+
+		// main.tftest.hcl.setup.child_a
+		// (no download because it's a relative path inside acctest_child_a)
+		{
+			Name:       "Install",
+			ModuleAddr: "test.main.setup.child_a",
+			LocalPath:  filepath.Join(dir, ".terraform/modules/test.main.setup/modules/child_a"),
+		},
+
+		// main.tftest.hcl.setup.child_a.child_b
+		// (no download because it's a relative path inside main.tftest.hcl.setup.child_a)
+		{
+			Name:       "Install",
+			ModuleAddr: "test.main.setup.child_a.child_b",
+			LocalPath:  filepath.Join(dir, ".terraform/modules/test.main.setup/modules/child_b"),
+		},
+	}
+
+	if diff := cmp.Diff(wantCalls, hooks.Calls); diff != "" {
+		t.Fatalf("wrong installer calls\n%s", diff)
+	}
+
+	//check that the registry reponses were cached
+	packageAddr := addrs.ModuleRegistryPackage{
+		Host:         svchost.Hostname("registry.terraform.io"),
+		Namespace:    "hashicorp",
+		Name:         "module-installer-acctest",
+		TargetSystem: "aws",
+	}
+	if _, ok := inst.registryPackageVersions[packageAddr]; !ok {
+		t.Errorf("module versions cache was not populated\ngot: %s\nwant: key hashicorp/module-installer-acctest/aws", spew.Sdump(inst.registryPackageVersions))
+	}
+	if _, ok := inst.registryPackageSources[moduleVersion{module: packageAddr, version: "0.0.1"}]; !ok {
+		t.Errorf("module download url cache was not populated\ngot: %s", spew.Sdump(inst.registryPackageSources))
+	}
+
+	loader, err = configload.NewLoader(&configload.Config{
+		ModulesDir: modulesDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Make sure the configuration is loadable now.
+	// (This ensures that correct information is recorded in the manifest.)
+	config, loadDiags := loader.LoadConfigWithTests(".", "tests")
+	assertNoDiagnostics(t, tfdiags.Diagnostics{}.Append(loadDiags))
+
+	if config.Module.Tests["main.tftest.hcl"].Runs[0].ConfigUnderTest == nil {
+		t.Fatalf("should have loaded config into the relevant run block but did not")
+	}
 }
 
 type testInstallHooks struct {
@@ -518,7 +903,7 @@ func tempChdir(t *testing.T, sourceDir string) (string, func()) {
 		return "", nil
 	}
 
-	if err := copyDir(tmpDir, sourceDir); err != nil {
+	if err := copy.CopyDir(tmpDir, sourceDir); err != nil {
 		t.Fatalf("failed to copy fixture to temporary directory: %s", err)
 		return "", nil
 	}
@@ -562,7 +947,7 @@ func assertDiagnosticCount(t *testing.T, diags tfdiags.Diagnostics, want int) bo
 	if len(diags) != 0 {
 		t.Errorf("wrong number of diagnostics %d; want %d", len(diags), want)
 		for _, diag := range diags {
-			t.Logf("- %s", diag)
+			t.Logf("- %#v", diag)
 		}
 		return true
 	}
@@ -580,7 +965,7 @@ func assertDiagnosticSummary(t *testing.T, diags tfdiags.Diagnostics, want strin
 
 	t.Errorf("missing diagnostic summary %q", want)
 	for _, diag := range diags {
-		t.Logf("- %s", diag)
+		t.Logf("- %#v", diag)
 	}
 	return true
 }

@@ -1,56 +1,42 @@
-# Building Terraform
+# Building from Source
 
-This document contains details about the process for building binaries for
-Terraform. 
+Pre-built binaries are available for download for a variety of supported platforms through the [HashiCorp Releases website](https://releases.hashicorp.com/terraform/). 
 
-## Versioning
+However, if you'd like to build Terraform yourself, you can do so using the Go build toolchain and the options specified in this document.
 
-As a pre-1.0 project, we use the MINOR and PATCH versions as follows:
+## Prerequisites
 
- * a `MINOR` version increment indicates a release that may contain backwards
-   incompatible changes
- * a `PATCH` version increment indicates a release that may contain bugfixes as
-   well as additive (backwards compatible) features and enhancements
+1. Ensure you've installed the Go language version specified in [`.go-version`](https://github.com/hashicorp/terraform/blob/main/.go-version).
+2. Clone this repository to a location of your choice.
 
-## Process
+## Terraform Build Options
 
-If only need to build binaries for the platform you're running (Windows, Linux,
-Mac OS X etc..), you can follow the instructions in the README for [Developing
-Terraform][1].
+Terraform accepts certain options passed using `ldflags` at build time which control the behavior of the resulting binary.
 
-The guide below outlines the steps HashiCorp takes to build the official release 
-binaries for Terraform. This process will generate a set of binaries for each supported
-platform, using the [gox](https://github.com/mitchellh/gox) tool.
+### Dev Version Reporting
 
-A Vagrant virtual machine is used to provide a consistent environment with
-the pre-requisite tools in place. The specifics of this VM are defined in the 
-[Vagrantfile](Vagrantfile).
+Terraform will include a `-dev` flag when reporting its own version (ex: 1.5.0-dev) unless `version.dev` is set to `no`:
 
-
-```sh
-# clone the repository if needed
-git clone https://github.com/hashicorp/terraform.git
-cd terraform
-
-# Spin up a fresh build VM
-vagrant destroy -f
-vagrant up
-vagrant ssh
-
-# The Vagrantfile installs Go and configures the $GOPATH at /opt/gopath
-# The current "terraform" directory is then sync'd into the gopath
-cd /opt/gopath/src/github.com/hashicorp/terraform/
-
-# Verify unit tests pass
-make test
-
-# Build the release
-# This generates binaries for each platform and places them in the pkg folder
-make bin
+```
+go build -ldflags "-w -s -X 'github.com/hashicorp/terraform/version.dev=no'" -o bin/ .
 ```
 
-After running these commands, you should have binaries for all supported
-platforms in the `pkg` folder.
+### Experimental Features
+
+Experimental features of Terraform will be disabled unless `main.experimentsAllowed` is set to `yes`:
+
+```
+go build -ldflags "-w -s -X 'main.experimentsAllowed=yes'" -o bin/ .
+```
+
+In the official build process for Terraform, experiments are only allowed in alpha release builds. We recommend that third-party distributors follow that convention in order to reduce user confusion.
+
+## Go Options
+
+For the most part, the Terraform release process relies on the Go toolchain defaults for the target operating system and processor architecture.
+
+### `CGO_ENABLED`
+
+One exception is the `CGO_ENABLED` option, which is set explicitly when building Terraform binaries. For most platforms, we build with `CGO_ENABLED=0` in order to produce a statically linked binary. For MacOS/Darwin operating systems, we build with `CGO_ENABLED=1` to avoid a platform-specific issue with DNS resolution. 
 
 
-[1]: https://github.com/hashicorp/terraform#developing-terraform

@@ -1,11 +1,11 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: MPL-2.0
+
 package main
 
 import (
 	"github.com/hashicorp/terraform/version"
 )
-
-// The git commit that was compiled. This will be filled in by the compiler.
-var GitCommit string
 
 var Version = version.Version
 

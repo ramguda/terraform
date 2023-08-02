@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: MPL-2.0
+
 package main
 
 import (
@@ -10,14 +13,14 @@ import (
 )
 
 func TestMain_cliArgsFromEnv(t *testing.T) {
-	// Setup the state. This test really messes with the environment and
+	// Set up the state. This test really messes with the environment and
 	// global state so we set things up to be restored.
 
 	// Restore original CLI args
 	oldArgs := os.Args
 	defer func() { os.Args = oldArgs }()
 
-	// Setup test command and restore that
+	// Set up test command and restore that
 	Commands = make(map[string]cli.CommandFactory)
 	defer func() {
 		Commands = nil
@@ -46,8 +49,8 @@ func TestMain_cliArgsFromEnv(t *testing.T) {
 		{
 			"both env var and CLI",
 			[]string{testCommandName, "foo", "bar"},
-			"-foo bar",
-			[]string{"-foo", "bar", "foo", "bar"},
+			"-foo baz",
+			[]string{"-foo", "baz", "foo", "bar"},
 			false,
 		},
 
@@ -122,7 +125,7 @@ func TestMain_cliArgsFromEnv(t *testing.T) {
 				}
 			}
 
-			// Setup the args
+			// Set up the args
 			args := make([]string, len(tc.Args)+1)
 			args[0] = oldArgs[0] // process name
 			copy(args[1:], tc.Args)
@@ -130,7 +133,7 @@ func TestMain_cliArgsFromEnv(t *testing.T) {
 			// Run it!
 			os.Args = args
 			testCommand.Args = nil
-			exit := wrappedMain()
+			exit := realMain()
 			if (exit != 0) != tc.Err {
 				t.Fatalf("bad: %d", exit)
 			}
@@ -140,7 +143,7 @@ func TestMain_cliArgsFromEnv(t *testing.T) {
 
 			// Verify
 			if !reflect.DeepEqual(testCommand.Args, tc.Expected) {
-				t.Fatalf("bad: %#v", testCommand.Args)
+				t.Fatalf("expected args %#v but got %#v", tc.Expected, testCommand.Args)
 			}
 		})
 	}
@@ -153,7 +156,7 @@ func TestMain_cliArgsFromEnvAdvanced(t *testing.T) {
 	oldArgs := os.Args
 	defer func() { os.Args = oldArgs }()
 
-	// Setup test command and restore that
+	// Set up test command and restore that
 	Commands = make(map[string]cli.CommandFactory)
 	defer func() {
 		Commands = nil
@@ -211,7 +214,7 @@ func TestMain_cliArgsFromEnvAdvanced(t *testing.T) {
 
 	for i, tc := range cases {
 		t.Run(fmt.Sprintf("%d-%s", i, tc.Name), func(t *testing.T) {
-			// Setup test command and restore that
+			// Set up test command and restore that
 			testCommandName := tc.Command
 			testCommand := &testCommandCLI{}
 			defer func() { delete(Commands, testCommandName) }()
@@ -229,7 +232,7 @@ func TestMain_cliArgsFromEnvAdvanced(t *testing.T) {
 				}
 			}
 
-			// Setup the args
+			// Set up the args
 			args := make([]string, len(tc.Args)+1)
 			args[0] = oldArgs[0] // process name
 			copy(args[1:], tc.Args)
@@ -237,7 +240,7 @@ func TestMain_cliArgsFromEnvAdvanced(t *testing.T) {
 			// Run it!
 			os.Args = args
 			testCommand.Args = nil
-			exit := wrappedMain()
+			exit := realMain()
 			if (exit != 0) != tc.Err {
 				t.Fatalf("unexpected exit status %d; want 0", exit)
 			}
@@ -253,6 +256,34 @@ func TestMain_cliArgsFromEnvAdvanced(t *testing.T) {
 	}
 }
 
+// verify that we output valid autocomplete results
+func TestMain_autoComplete(t *testing.T) {
+	// Restore original CLI args
+	oldArgs := os.Args
+	defer func() { os.Args = oldArgs }()
+
+	// Set up test command and restore that
+	Commands = make(map[string]cli.CommandFactory)
+	defer func() {
+		Commands = nil
+	}()
+
+	// Set up test command and restore that
+	Commands["foo"] = func() (cli.Command, error) {
+		return &testCommandCLI{}, nil
+	}
+
+	os.Setenv("COMP_LINE", "terraform versio")
+	defer os.Unsetenv("COMP_LINE")
+
+	// Run it!
+	os.Args = []string{"terraform", "terraform", "versio"}
+	exit := realMain()
+	if exit != 0 {
+		t.Fatalf("unexpected exit status %d; want 0", exit)
+	}
+}
+
 type testCommandCLI struct {
 	Args []string
 }
@@ -264,3 +295,20 @@ func (c *testCommandCLI) Run(args []string) int {
 
 func (c *testCommandCLI) Synopsis() string { return "" }
 func (c *testCommandCLI) Help() string     { return "" }
+
+func TestWarnOutput(t *testing.T) {
+	mock := cli.NewMockUi()
+	wrapped := &ui{mock}
+	wrapped.Warn("WARNING")
+
+	stderr := mock.ErrorWriter.String()
+	stdout := mock.OutputWriter.String()
+
+	if stderr != "" {
+		t.Fatalf("unexpected stderr: %q", stderr)
+	}
+
+	if stdout != "WARNING\n" {
+		t.Fatalf("unexpected stdout: %q\n", stdout)
+	}
+}
